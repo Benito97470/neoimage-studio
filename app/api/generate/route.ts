@@ -93,8 +93,13 @@ const OPENAI_SIZES: Record<Resolution, Record<AspectRatio, string>> = {
   },
 };
 
-function errorResponse(message: string, status = 400) {
-  return NextResponse.json({ error: message }, { status, headers: { "Cache-Control": "no-store" } });
+type ProviderErrorCode = "PROVIDER_SAFETY_BLOCK";
+
+function errorResponse(message: string, status = 400, code?: ProviderErrorCode) {
+  return NextResponse.json(
+    { error: message, ...(code ? { code } : {}) },
+    { status, headers: { "Cache-Control": "no-store" } },
+  );
 }
 
 function providerMessage(payload: unknown, fallback: string) {
@@ -107,6 +112,32 @@ function providerMessage(payload: unknown, fallback: string) {
     if (typeof message === "string") return message;
   }
   return typeof value.message === "string" ? value.message : fallback;
+}
+
+function providerFailure(payload: unknown, fallback: string): { message: string; code?: ProviderErrorCode } {
+  let serialized = "";
+  try {
+    serialized = JSON.stringify(payload).toLowerCase();
+  } catch {
+    // The provider payload is not expected to be cyclic, but the fallback remains safe if it is.
+  }
+
+  const safetyBlocked = [
+    "safety_violations",
+    "content_policy_violation",
+    "prohibited_content",
+    "blocked_reason",
+  ].some((marker) => serialized.includes(marker));
+
+  if (safetyBlocked) {
+    const category = serialized.includes("sexual") ? " comme contenu potentiellement sexuel" : " pour contenu potentiellement sensible";
+    return {
+      code: "PROVIDER_SAFETY_BLOCK",
+      message: `Le fournisseur a bloqué cette génération${category}. Ce classement est automatique et peut parfois être imprécis. Reformulez le prompt en termes non explicites ou essayez un autre fournisseur.`,
+    };
+  }
+
+  return { message: providerMessage(payload, fallback) };
 }
 
 function findGoogleImage(value: unknown): { data: string; mimeType: string } | null {
@@ -218,7 +249,10 @@ export async function POST(request: Request) {
         body: JSON.stringify({ model, prompt, size, quality, output_format: "png" }),
       });
       const payload = await response.json() as { data?: Array<{ b64_json?: string }>; error?: unknown };
-      if (!response.ok) return errorResponse(providerMessage(payload, "OpenAI a refusé la requête."), response.status);
+      if (!response.ok) {
+        const failure = providerFailure(payload, "OpenAI a refusé la requête.");
+        return errorResponse(failure.message, response.status, failure.code);
+      }
       const base64 = payload.data?.[0]?.b64_json;
       if (!base64) return errorResponse("OpenAI n’a renvoyé aucune image.", 502);
       const history = await saveSyncedHistory(decodeBase64(base64), "image/png", {
@@ -252,7 +286,10 @@ export async function POST(request: Request) {
       }),
     });
     const payload = await response.json() as unknown;
-    if (!response.ok) return errorResponse(providerMessage(payload, "Google a refusé la requête."), response.status);
+    if (!response.ok) {
+      const failure = providerFailure(payload, "Google a refusé la requête.");
+      return errorResponse(failure.message, response.status, failure.code);
+    }
     const image = findGoogleImage(payload);
     if (!image) return errorResponse("Google n’a renvoyé aucune image.", 502);
     const history = await saveSyncedHistory(decodeBase64(image.data), image.mimeType, {

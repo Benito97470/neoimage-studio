@@ -22,6 +22,7 @@ test("renders NeoImage Studio metadata and product surface", async () => {
   assert.match(html, /Historique/);
   assert.match(html, /Nouveau/);
   assert.match(html, /Compte NeoImage/);
+  assert.match(html, /Coffre synchronisé/);
   assert.match(html, /historique synchronisé privé/);
   assert.doesNotMatch(html, /codex-preview/);
 });
@@ -99,4 +100,67 @@ test("protects NeoImage account creation behind authenticated identity", async (
   const payload = await response.json();
   assert.equal(payload.authenticated, false);
   assert.match(payload.signInUrl, /^\/signin-with-chatgpt\?/);
+});
+
+test("protects the synchronized API vault behind authenticated identity", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("vault-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const env = { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } };
+  const ctx = { waitUntil() {}, passThroughOnException() {} };
+
+  const response = await worker.fetch(
+    new Request("http://localhost/api/vault", { headers: { accept: "application/json" } }),
+    env,
+    ctx,
+  );
+
+  assert.equal(response.status, 401);
+  const payload = await response.json();
+  assert.match(payload.signInUrl, /^\/signin-with-chatgpt\?/);
+});
+
+test("normalizes provider safety blocks without exposing the raw technical error", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("safety-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    if (String(input).includes("api.openai.com/v1/images/generations")) {
+      return new Response(JSON.stringify({ error: { message: "safety_violations=[sexual]" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const response = await worker.fetch(
+      new Request("http://localhost/api/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "openai",
+          model: "gpt-image-2",
+          apiKey: "test-key",
+          prompt: "portrait éditorial",
+          aspectRatio: "1:1",
+          resolution: "1K",
+          quality: "medium",
+        }),
+      }),
+      { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
+      { waitUntil() {}, passThroughOnException() {} },
+    );
+
+    assert.equal(response.status, 400);
+    const payload = await response.json();
+    assert.equal(payload.code, "PROVIDER_SAFETY_BLOCK");
+    assert.match(payload.error, /classement est automatique/);
+    assert.doesNotMatch(payload.error, /safety_violations/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
