@@ -26,7 +26,7 @@ type AccountProfile = {
 
 type AccountState =
   | { status: "loading" }
-  | { status: "signedOut"; signInUrl: string }
+  | { status: "signedOut"; authMode: "local" | "social"; signInUrl: string }
   | { status: "needsProfile"; identity: { email: string; displayName: string }; signOutUrl: string }
   | { status: "ready"; profile: AccountProfile; signOutUrl: string }
   | { status: "error"; message: string };
@@ -347,11 +347,16 @@ export default function Home() {
         profile?: AccountProfile | null;
         signInUrl?: string;
         signOutUrl?: string;
+        authMode?: "local" | "social";
         error?: string;
       };
 
       if (response.status === 401) {
-        setAccount({ status: "signedOut", signInUrl: payload.signInUrl || "/signin-with-chatgpt?return_to=%2F%3Ftab%3Dhistory" });
+        setAccount({
+          status: "signedOut",
+          authMode: payload.authMode ?? "social",
+          signInUrl: payload.signInUrl || "/signin-with-chatgpt?return_to=%2F%3Ftab%3Dhistory",
+        });
         setHistory([]);
         setHistoryLoading(false);
         return;
@@ -654,10 +659,15 @@ export default function Home() {
         profile?: AccountProfile;
         signOutUrl?: string;
         signInUrl?: string;
+        authMode?: "local" | "social";
         error?: string;
       };
       if (response.status === 401) {
-        setAccount({ status: "signedOut", signInUrl: payload.signInUrl || "/signin-with-chatgpt?return_to=%2F%3Ftab%3Dhistory" });
+        setAccount({
+          status: "signedOut",
+          authMode: payload.authMode ?? "social",
+          signInUrl: payload.signInUrl || "/signin-with-chatgpt?return_to=%2F%3Ftab%3Dhistory",
+        });
         return;
       }
       if (!response.ok || !payload.profile) throw new Error(payload.error || "Impossible de créer le compte.");
@@ -884,7 +894,7 @@ export default function Home() {
             {account.status !== "ready" ? (
               <div className="vault-gate">
                 <p>Un compte NeoImage est nécessaire pour synchroniser le coffre.</p>
-                {account.status === "signedOut" && <a href={account.signInUrl}>Google, Microsoft, Apple ou SSO</a>}
+                {account.status === "signedOut" && <a href={account.signInUrl}>{account.authMode === "local" ? "Utiliser le compte de test local" : "Google, Microsoft, Apple ou SSO"}</a>}
                 {account.status === "needsProfile" && <button type="button" onClick={() => setActiveView("history")}>Créer le compte NeoImage</button>}
               </div>
             ) : vaultRecord === undefined ? (
@@ -1097,12 +1107,24 @@ export default function Home() {
           {account.status === "signedOut" && (
             <div className="account-gate">
               <div className="gate-icon"><Icon name="user" /></div>
-              <span className="gate-kicker">Compte requis</span>
-              <h3>Connectez votre compte NeoImage</h3>
-              <p>Utilisez Google, Microsoft, Apple ou le SSO de votre organisation. À l’étape suivante, ChatGPT vérifie votre identité sans transmettre votre mot de passe à NeoImage.</p>
-              <SocialLoginOptions />
-              <a className="account-primary social-login-primary" href={account.signInUrl}>Choisir mon mode de connexion <Icon name="arrow" /></a>
-              <small><Icon name="shield" /> Connexion sécurisée par ChatGPT · historique synchronisé sur mobile et PC.</small>
+              {account.authMode === "local" ? (
+                <>
+                  <span className="gate-kicker">Développement local</span>
+                  <h3>Ouvrez un compte de test local</h3>
+                  <p>La connexion Google, Microsoft, Apple et SSO est fournie par le site publié. Sur localhost, utilisez ce compte temporaire pour tester NeoImage sans page introuvable.</p>
+                  <a className="account-primary social-login-primary" href={account.signInUrl}>Continuer en mode local <Icon name="arrow" /></a>
+                  <small><Icon name="shield" /> Réservé à cet ordinateur · aucune connexion tierce simulée.</small>
+                </>
+              ) : (
+                <>
+                  <span className="gate-kicker">Compte requis</span>
+                  <h3>Connectez votre compte NeoImage</h3>
+                  <p>Utilisez Google, Microsoft, Apple ou le SSO de votre organisation. À l’étape suivante, ChatGPT vérifie votre identité sans transmettre votre mot de passe à NeoImage.</p>
+                  <SocialLoginOptions />
+                  <a className="account-primary social-login-primary" href={account.signInUrl}>Choisir mon mode de connexion <Icon name="arrow" /></a>
+                  <small><Icon name="shield" /> Connexion sécurisée par ChatGPT · historique synchronisé sur mobile et PC.</small>
+                </>
+              )}
             </div>
           )}
 

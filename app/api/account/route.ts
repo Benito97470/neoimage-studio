@@ -1,6 +1,6 @@
 import { eq, sql } from "drizzle-orm";
-import { getChatGPTUser, chatGPTSignInPath, chatGPTSignOutPath } from "../../chatgpt-auth";
-import { getDb } from "../../../db";
+import { authSignInPath, authSignOutPath, getChatGPTUser, isLocalRequestUrl } from "../../chatgpt-auth";
+import { ensureLocalDevelopmentSchema, getDb } from "../../../db";
 import { neoimageProfiles } from "../../../db/schema";
 
 export const runtime = "edge";
@@ -25,16 +25,21 @@ async function findProfile(email: string) {
   return profile ?? null;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const identity = await getChatGPTUser();
   if (!identity) {
     return Response.json(
-      { authenticated: false, signInUrl: chatGPTSignInPath("/?tab=history") },
+      {
+        authenticated: false,
+        authMode: isLocalRequestUrl(request.url) ? "local" : "social",
+        signInUrl: authSignInPath(request, "/?tab=history"),
+      },
       { status: 401, headers: { "Cache-Control": "no-store" } },
     );
   }
 
   try {
+    if (identity.authSource === "local") await ensureLocalDevelopmentSchema();
     const email = normalizeEmail(identity.email);
     const profile = await findProfile(email);
     return Response.json(
@@ -42,7 +47,7 @@ export async function GET() {
         authenticated: true,
         identity: { email, displayName: identity.displayName },
         profile,
-        signOutUrl: chatGPTSignOutPath("/"),
+        signOutUrl: authSignOutPath(request, "/"),
       },
       { headers: { "Cache-Control": "no-store" } },
     );
@@ -67,7 +72,8 @@ export async function POST(request: Request) {
     return Response.json(
       {
         error: "Connectez-vous avec ChatGPT pour créer votre compte NeoImage.",
-        signInUrl: chatGPTSignInPath("/?tab=history"),
+        authMode: isLocalRequestUrl(request.url) ? "local" : "social",
+        signInUrl: authSignInPath(request, "/?tab=history"),
       },
       { status: 401, headers: { "Cache-Control": "no-store" } },
     );
@@ -81,6 +87,7 @@ export async function POST(request: Request) {
   }
 
   try {
+    if (identity.authSource === "local") await ensureLocalDevelopmentSchema();
     const email = normalizeEmail(identity.email);
     const displayName = safeDisplayName(payload.displayName, identity.displayName);
     const db = await getDb();
@@ -94,7 +101,7 @@ export async function POST(request: Request) {
 
     const profile = await findProfile(email);
     return Response.json(
-      { authenticated: true, profile, signOutUrl: chatGPTSignOutPath("/") },
+      { authenticated: true, profile, signOutUrl: authSignOutPath(request, "/") },
       { status: 201, headers: { "Cache-Control": "no-store" } },
     );
   } catch {
