@@ -85,7 +85,7 @@ test("validates model and resolution compatibility before provider calls", async
   assert.match(await incompatibleResolution.text(), /limité au 1K/);
 });
 
-test("protects NeoImage account creation behind authenticated identity", async () => {
+test("uses a local test account instead of the hosted sign-in route on localhost", async () => {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("account-test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
@@ -101,7 +101,51 @@ test("protects NeoImage account creation behind authenticated identity", async (
   assert.equal(response.status, 401);
   const payload = await response.json();
   assert.equal(payload.authenticated, false);
+  assert.equal(payload.authMode, "local");
+  assert.match(payload.signInUrl, /^\/api\/local-auth\?/);
+});
+
+test("keeps the hosted ChatGPT sign-in route outside localhost", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("hosted-account-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const env = { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } };
+  const ctx = { waitUntil() {}, passThroughOnException() {} };
+
+  const response = await worker.fetch(
+    new Request("https://neoimage.example/api/account", { headers: { accept: "application/json" } }),
+    env,
+    ctx,
+  );
+
+  assert.equal(response.status, 401);
+  const payload = await response.json();
+  assert.equal(payload.authMode, "social");
   assert.match(payload.signInUrl, /^\/signin-with-chatgpt\?/);
+});
+
+test("creates the local development session without exposing it on production hosts", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("local-auth-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const env = { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } };
+  const ctx = { waitUntil() {}, passThroughOnException() {} };
+
+  const localResponse = await worker.fetch(
+    new Request("http://localhost/api/local-auth?return_to=%2F%3Ftab%3Dhistory"),
+    env,
+    ctx,
+  );
+  assert.equal(localResponse.status, 303);
+  assert.match(localResponse.headers.get("set-cookie") || "", /neoimage_local_session=1/);
+  assert.equal(localResponse.headers.get("location"), "http://localhost/?tab=history");
+
+  const hostedResponse = await worker.fetch(
+    new Request("https://neoimage.example/api/local-auth"),
+    env,
+    ctx,
+  );
+  assert.equal(hostedResponse.status, 404);
 });
 
 test("protects the synchronized API vault behind authenticated identity", async () => {
