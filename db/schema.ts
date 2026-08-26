@@ -15,6 +15,18 @@ export const neoimageProfiles = sqliteTable(
   ],
 );
 
+export const neoimageApiVaults = sqliteTable("neoimage_api_vaults", {
+  profileId: text("profile_id")
+    .primaryKey()
+    .references(() => neoimageProfiles.id, { onDelete: "cascade" }),
+  ciphertext: text("ciphertext").notNull(),
+  salt: text("salt").notNull(),
+  iv: text("iv").notNull(),
+  kdfIterations: integer("kdf_iterations").notNull(),
+  version: integer("version").notNull().default(1),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const neoimageHistory = sqliteTable(
   "neoimage_history",
   {

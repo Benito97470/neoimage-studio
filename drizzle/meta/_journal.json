@@ -15,6 +15,13 @@
       "when": 1787508972813,
       "tag": "0001_goofy_giant_girl",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787623433217,
+      "tag": "0002_special_flatman",
+      "breakpoints": true
     }
   ]
 }

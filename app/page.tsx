@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { TransformComponent, TransformWrapper, type ReactZoomPanPinchRef } from "react-zoom-pan-pinch";
 
 type Provider = "openai" | "google";
 type AspectRatio = "1:1" | "4:3" | "3:2" | "16:9" | "21:9" | "9:16" | "3:4" | "2:3" | "4:5" | "5:4";
@@ -52,6 +53,19 @@ type ViewerImage = {
   label: string;
 };
 
+type GenerationErrorCode = "PROVIDER_SAFETY_BLOCK";
+
+type ApiKeys = Record<Provider, string>;
+
+type VaultRecord = {
+  ciphertext: string;
+  salt: string;
+  iv: string;
+  kdfIterations: number;
+  version: number;
+  updatedAt: string;
+};
+
 const PROVIDERS = {
   openai: { name: "OpenAI", family: "GPT Image", placeholder: "sk-proj-…", accent: "#7c9cff" },
   google: { name: "Google", family: "Nano Banana", placeholder: "AIza…", accent: "#ff8c69" },
@@ -97,6 +111,74 @@ const PROMPT_IDEAS = [
   "Photo produit en lumière naturelle",
 ];
 
+const SOCIAL_LOGIN_OPTIONS = [
+  { id: "google", label: "Google", mark: "G" },
+  { id: "microsoft", label: "Microsoft", mark: "M" },
+  { id: "apple", label: "Apple", mark: "A" },
+  { id: "sso", label: "SSO", mark: "S" },
+] as const;
+
+const VIEWER_MAX_ZOOM = 5;
+const VAULT_KDF_ITERATIONS = 310_000;
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string) {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function vaultAdditionalData(profileId: string) {
+  return new TextEncoder().encode(`neoimage-api-vault:${profileId}:v1`);
+}
+
+async function deriveVaultKey(passphrase: string, salt: Uint8Array, iterations: number) {
+  const material = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(passphrase),
+    "PBKDF2",
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+async function encryptApiKeys(key: CryptoKey, keys: ApiKeys, profileId: string) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(keys));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: vaultAdditionalData(profileId) },
+    key,
+    plaintext,
+  );
+  return { ciphertext: bytesToBase64(new Uint8Array(ciphertext)), iv: bytesToBase64(iv) };
+}
+
+async function decryptApiKeys(key: CryptoKey, vault: VaultRecord, profileId: string): Promise<ApiKeys> {
+  const plaintext = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: base64ToBytes(vault.iv),
+      additionalData: vaultAdditionalData(profileId),
+    },
+    key,
+    base64ToBytes(vault.ciphertext),
+  );
+  const parsed = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<ApiKeys>;
+  if (typeof parsed.openai !== "string" || typeof parsed.google !== "string") throw new Error("Coffre invalide.");
+  return { openai: parsed.openai, google: parsed.google };
+}
+
 function supportedResolutions(provider: Provider, model: string): Resolution[] {
   if (provider === "openai") return model === "gpt-image-2" ? ["1K", "2K", "4K"] : ["1K"];
   return model === "gemini-3.1-flash-image" || model === "gemini-3-pro-image"
@@ -129,6 +211,19 @@ function Icon({ name }: { name: "sparkles" | "key" | "eye" | "eyeOff" | "downloa
     close: <><path d="m5 5 14 14M19 5 5 19"/></>,
   };
   return <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+}
+
+function SocialLoginOptions() {
+  return (
+    <div className="social-login-options" aria-label="Méthodes de connexion compatibles">
+      {SOCIAL_LOGIN_OPTIONS.map((option) => (
+        <span className="social-login-option" key={option.id}>
+          <i className={`social-login-mark ${option.id}`} aria-hidden="true">{option.mark}</i>
+          {option.label}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function historyStorageKey(profileId: string) {
@@ -178,6 +273,14 @@ export default function Home() {
   const [keys, setKeys] = useState<Record<Provider, string>>({ openai: "", google: "" });
   const [keysLoaded, setKeysLoaded] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [vaultRecord, setVaultRecord] = useState<VaultRecord | null | undefined>(undefined);
+  const [vaultUnlocked, setVaultUnlocked] = useState(false);
+  const [vaultPassphrase, setVaultPassphrase] = useState("");
+  const [vaultConfirmation, setVaultConfirmation] = useState("");
+  const [vaultBusy, setVaultBusy] = useState(false);
+  const [vaultError, setVaultError] = useState<string | null>(null);
+  const [vaultNotice, setVaultNotice] = useState<string | null>(null);
+  const vaultKeyRef = useRef<CryptoKey | null>(null);
   const [prompt, setPrompt] = useState("");
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>("1:1");
   const [resolution, setResolution] = useState<Resolution>("2K");
@@ -186,15 +289,13 @@ export default function Home() {
   const [resultInfo, setResultInfo] = useState<{ model: string; aspectRatio: AspectRatio; resolution: Resolution } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<GenerationErrorCode | null>(null);
   const [copied, setCopied] = useState(false);
   const [viewer, setViewer] = useState<ViewerImage | null>(null);
   const [viewerZoom, setViewerZoom] = useState(1);
-  const [viewerMaxZoom, setViewerMaxZoom] = useState(1);
-  const viewerScrollRef = useRef<HTMLDivElement>(null);
-  const viewerImageRef = useRef<HTMLImageElement>(null);
-  const viewerDragRef = useRef({ active: false, pointerId: -1, x: 0, y: 0, left: 0, top: 0 });
-  const viewerPointersRef = useRef(new Map<number, { x: number; y: number }>());
-  const viewerPinchRef = useRef<{ distance: number; zoom: number } | null>(null);
+  const viewerZoomOutputRef = useRef<HTMLOutputElement>(null);
+  const viewerScaleRef = useRef(1);
+  const viewerTransformApiRef = useRef<ReactZoomPanPinchRef | null>(null);
 
   const active = PROVIDERS[provider];
   const selectedModelId = models[provider];
@@ -274,6 +375,34 @@ export default function Home() {
     }
   }, [loadSyncedHistory]);
 
+  const loadVault = useCallback(async () => {
+    vaultKeyRef.current = null;
+    setVaultUnlocked(false);
+    setVaultPassphrase("");
+    setVaultConfirmation("");
+    setVaultError(null);
+    setVaultNotice(null);
+
+    if (account.status !== "ready") {
+      setVaultRecord(undefined);
+      if (account.status !== "loading") setKeys({ openai: "", google: "" });
+      return;
+    }
+
+    setVaultRecord(undefined);
+    try {
+      const response = await fetch("/api/vault", { headers: { Accept: "application/json" } });
+      const payload = await response.json() as { vault?: VaultRecord | null; error?: string };
+      if (!response.ok) throw new Error(payload.error || "Impossible de charger le coffre.");
+      const remoteVault = payload.vault ?? null;
+      setVaultRecord(remoteVault);
+      if (remoteVault) setKeys({ openai: "", google: "" });
+    } catch (cause) {
+      setVaultRecord(null);
+      setVaultError(cause instanceof Error ? cause.message : "Coffre indisponible.");
+    }
+  }, [account]);
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (new URLSearchParams(window.location.search).get("tab") === "history") setActiveView("history");
@@ -299,163 +428,55 @@ export default function Home() {
     if (keysLoaded) sessionStorage.setItem("neoimage-studio:api-keys", JSON.stringify(keys));
   }, [keys, keysLoaded]);
 
-  const updateViewerZoomLimit = useCallback(() => {
-    const container = viewerScrollRef.current;
-    const viewedImage = viewerImageRef.current;
-    if (!container || !viewedImage?.naturalWidth || !viewedImage.naturalHeight) return;
-    const isTouchLayout = window.matchMedia("(max-width: 700px), (pointer: coarse)").matches;
-    const gutter = isTouchLayout ? 24 : 96;
-    const availableWidth = Math.max(1, container.clientWidth - gutter);
-    const availableHeight = Math.max(1, container.clientHeight - gutter);
-    const fitScale = Math.min(
-      availableWidth / viewedImage.naturalWidth,
-      availableHeight / viewedImage.naturalHeight,
-      1,
-    );
-    const nativeSizeLimit = 1 / fitScale;
-    const deviceMaximum = isTouchLayout ? 2 : 1.5;
-    const nextMaximum = Math.max(1, Math.min(deviceMaximum, Math.floor(nativeSizeLimit * 10) / 10));
-    setViewerMaxZoom(nextMaximum);
-    setViewerZoom((current) => Math.min(current, nextMaximum));
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadVault(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadVault]);
+
+  function openViewer(nextImage: ViewerImage) {
+    viewerScaleRef.current = 1;
+    setViewerZoom(1);
+    setViewer(nextImage);
+  }
+
+  const syncViewerScale = useCallback((scale: number, wrapper?: HTMLDivElement | null) => {
+    viewerScaleRef.current = scale;
+    if (viewerZoomOutputRef.current) {
+      viewerZoomOutputRef.current.textContent = `${Math.round(scale * 100)}%`;
+    }
+    wrapper?.classList.toggle("can-pan", scale > 1.005);
   }, []);
+
+  const commitViewerScale = useCallback((ref: ReactZoomPanPinchRef) => {
+    syncViewerScale(ref.state.scale, ref.instance.wrapperComponent);
+    setViewerZoom(ref.state.scale);
+  }, [syncViewerScale]);
 
   useEffect(() => {
     if (!viewer) return;
     const previousOverflow = document.body.style.overflow;
-    const activePointers = viewerPointersRef.current;
     document.body.style.overflow = "hidden";
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setViewer(null);
-      if (event.key === "+" || event.key === "=") setViewerZoom((current) => Math.min(viewerMaxZoom, Math.round((current + 0.1) * 10) / 10));
-      if (event.key === "-") setViewerZoom((current) => Math.max(1, Math.round((current - 0.1) * 10) / 10));
-      if (event.key === "0") setViewerZoom(1);
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        viewerTransformApiRef.current?.zoomIn(Math.log(1.25), 180, "easeOut");
+      }
+      if (event.key === "-") {
+        event.preventDefault();
+        viewerTransformApiRef.current?.zoomOut(Math.log(1.25), 180, "easeOut");
+      }
+      if (event.key === "0") {
+        event.preventDefault();
+        viewerTransformApiRef.current?.resetTransform(180, "easeOut");
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("resize", updateViewerZoomLimit);
     return () => {
       document.body.style.overflow = previousOverflow;
-      activePointers.clear();
-      viewerPinchRef.current = null;
       window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("resize", updateViewerZoomLimit);
     };
-  }, [viewer, viewerMaxZoom, updateViewerZoomLimit]);
-
-  function openViewer(nextImage: ViewerImage) {
-    setViewerZoom(1);
-    setViewerMaxZoom(1);
-    viewerPointersRef.current.clear();
-    viewerPinchRef.current = null;
-    setViewer(nextImage);
-    window.requestAnimationFrame(() => viewerScrollRef.current?.scrollTo({ top: 0, left: 0 }));
-  }
-
-  function changeViewerZoom(nextZoom: number, anchorX?: number, anchorY?: number) {
-    const next = Math.min(viewerMaxZoom, Math.max(1, Math.round(nextZoom * 10) / 10));
-    const container = viewerScrollRef.current;
-    if (!container || next === viewerZoom) return;
-    const x = anchorX ?? container.clientWidth / 2;
-    const y = anchorY ?? container.clientHeight / 2;
-    const contentX = container.scrollLeft + x;
-    const contentY = container.scrollTop + y;
-    const ratio = next / viewerZoom;
-    setViewerZoom(next);
-    window.requestAnimationFrame(() => {
-      container.scrollLeft = contentX * ratio - x;
-      container.scrollTop = contentY * ratio - y;
-    });
-  }
-
-  function resetViewerZoom() {
-    setViewerZoom(1);
-    window.requestAnimationFrame(() => viewerScrollRef.current?.scrollTo({ top: 0, left: 0, behavior: "smooth" }));
-  }
-
-  function handleViewerWheel(event: React.WheelEvent<HTMLDivElement>) {
-    event.preventDefault();
-    const bounds = event.currentTarget.getBoundingClientRect();
-    changeViewerZoom(
-      viewerZoom + (event.deltaY < 0 ? 0.1 : -0.1),
-      event.clientX - bounds.left,
-      event.clientY - bounds.top,
-    );
-  }
-
-  function handleViewerPointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    const container = viewerScrollRef.current;
-    if (!container) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const pointers = viewerPointersRef.current;
-    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-
-    if (pointers.size >= 2) {
-      const [first, second] = Array.from(pointers.values());
-      viewerPinchRef.current = {
-        distance: Math.hypot(second.x - first.x, second.y - first.y),
-        zoom: viewerZoom,
-      };
-      viewerDragRef.current.active = false;
-      return;
-    }
-
-    viewerDragRef.current = {
-      active: viewerZoom > 1,
-      pointerId: event.pointerId,
-      x: event.clientX,
-      y: event.clientY,
-      left: container.scrollLeft,
-      top: container.scrollTop,
-    };
-  }
-
-  function handleViewerPointerMove(event: React.PointerEvent<HTMLDivElement>) {
-    const container = viewerScrollRef.current;
-    const pointers = viewerPointersRef.current;
-    if (!container || !pointers.has(event.pointerId)) return;
-    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-
-    if (pointers.size >= 2 && viewerPinchRef.current) {
-      const [first, second] = Array.from(pointers.values());
-      const distance = Math.hypot(second.x - first.x, second.y - first.y);
-      const bounds = container.getBoundingClientRect();
-      const centerX = (first.x + second.x) / 2 - bounds.left;
-      const centerY = (first.y + second.y) / 2 - bounds.top;
-      event.preventDefault();
-      changeViewerZoom(
-        viewerPinchRef.current.zoom * (distance / Math.max(1, viewerPinchRef.current.distance)),
-        centerX,
-        centerY,
-      );
-      return;
-    }
-
-    const drag = viewerDragRef.current;
-    if (!drag.active || drag.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    container.scrollLeft = drag.left - (event.clientX - drag.x);
-    container.scrollTop = drag.top - (event.clientY - drag.y);
-  }
-
-  function stopViewerDrag(event: React.PointerEvent<HTMLDivElement>) {
-    const pointers = viewerPointersRef.current;
-    pointers.delete(event.pointerId);
-    viewerPinchRef.current = null;
-    const container = viewerScrollRef.current;
-    const remaining = Array.from(pointers.entries())[0];
-    if (remaining && container && viewerZoom > 1) {
-      viewerDragRef.current = {
-        active: true,
-        pointerId: remaining[0],
-        x: remaining[1].x,
-        y: remaining[1].y,
-        left: container.scrollLeft,
-        top: container.scrollTop,
-      };
-    } else {
-      viewerDragRef.current.active = false;
-    }
-  }
+  }, [viewer]);
 
   function keepCompatible(nextProvider: Provider, nextModel: string) {
     const resolutions = supportedResolutions(nextProvider, nextModel);
@@ -468,6 +489,7 @@ export default function Home() {
     setProvider(nextProvider);
     setShowKey(false);
     setError(null);
+    setErrorCode(null);
     keepCompatible(nextProvider, models[nextProvider]);
   }
 
@@ -475,10 +497,146 @@ export default function Home() {
     setModels((current) => ({ ...current, [provider]: nextModel }));
     keepCompatible(provider, nextModel);
     setError(null);
+    setErrorCode(null);
   }
 
   function updateKey(value: string) {
     setKeys((current) => ({ ...current, [provider]: value }));
+    if (vaultUnlocked) setVaultNotice("Clés modifiées — synchronisez le coffre.");
+  }
+
+  async function sendVault(payload: Omit<VaultRecord, "updatedAt">) {
+    const response = await fetch("/api/vault", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json() as { vault?: VaultRecord; error?: string };
+    if (!response.ok || !body.vault) throw new Error(body.error || "Impossible de synchroniser le coffre.");
+    return body.vault;
+  }
+
+  async function createVault() {
+    if (account.status !== "ready" || vaultBusy) return;
+    if (!keys.openai.trim() && !keys.google.trim()) {
+      setVaultError("Ajoutez au moins une clé API avant de créer le coffre.");
+      return;
+    }
+    if (vaultPassphrase.length < 12) {
+      setVaultError("La phrase secrète doit contenir au moins 12 caractères.");
+      return;
+    }
+    if (vaultPassphrase !== vaultConfirmation) {
+      setVaultError("Les deux phrases secrètes ne correspondent pas.");
+      return;
+    }
+
+    setVaultBusy(true);
+    setVaultError(null);
+    setVaultNotice(null);
+    try {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const key = await deriveVaultKey(vaultPassphrase, salt, VAULT_KDF_ITERATIONS);
+      const encrypted = await encryptApiKeys(key, keys, account.profile.id);
+      const saved = await sendVault({
+        ...encrypted,
+        salt: bytesToBase64(salt),
+        kdfIterations: VAULT_KDF_ITERATIONS,
+        version: 1,
+      });
+      vaultKeyRef.current = key;
+      setVaultRecord(saved);
+      setVaultUnlocked(true);
+      setVaultPassphrase("");
+      setVaultConfirmation("");
+      setVaultNotice("Coffre créé et synchronisé sur votre compte.");
+    } catch (cause) {
+      setVaultError(cause instanceof Error ? cause.message : "Création du coffre impossible.");
+    } finally {
+      setVaultBusy(false);
+    }
+  }
+
+  async function unlockVault() {
+    if (account.status !== "ready" || !vaultRecord || vaultBusy) return;
+    if (!vaultPassphrase) {
+      setVaultError("Saisissez votre phrase secrète.");
+      return;
+    }
+
+    setVaultBusy(true);
+    setVaultError(null);
+    setVaultNotice(null);
+    try {
+      const key = await deriveVaultKey(
+        vaultPassphrase,
+        base64ToBytes(vaultRecord.salt),
+        vaultRecord.kdfIterations,
+      );
+      const decrypted = await decryptApiKeys(key, vaultRecord, account.profile.id);
+      vaultKeyRef.current = key;
+      setKeys(decrypted);
+      setVaultUnlocked(true);
+      setVaultPassphrase("");
+      setVaultNotice("Coffre déverrouillé sur cet appareil.");
+    } catch {
+      vaultKeyRef.current = null;
+      setVaultError("Phrase secrète incorrecte ou coffre endommagé.");
+    } finally {
+      setVaultBusy(false);
+    }
+  }
+
+  async function syncVault() {
+    if (account.status !== "ready" || !vaultRecord || !vaultKeyRef.current || vaultBusy) return;
+    setVaultBusy(true);
+    setVaultError(null);
+    setVaultNotice(null);
+    try {
+      const encrypted = await encryptApiKeys(vaultKeyRef.current, keys, account.profile.id);
+      const saved = await sendVault({
+        ...encrypted,
+        salt: vaultRecord.salt,
+        kdfIterations: vaultRecord.kdfIterations,
+        version: vaultRecord.version,
+      });
+      setVaultRecord(saved);
+      setVaultNotice("Clés chiffrées et synchronisées.");
+    } catch (cause) {
+      setVaultError(cause instanceof Error ? cause.message : "Synchronisation impossible.");
+    } finally {
+      setVaultBusy(false);
+    }
+  }
+
+  function lockVault() {
+    vaultKeyRef.current = null;
+    setVaultUnlocked(false);
+    setKeys({ openai: "", google: "" });
+    setShowKey(false);
+    setVaultNotice("Coffre verrouillé sur cet appareil.");
+  }
+
+  async function resetVault() {
+    if (vaultBusy || !window.confirm("Réinitialiser le coffre synchronisé ? Les clés enregistrées seront définitivement supprimées.")) return;
+    setVaultBusy(true);
+    setVaultError(null);
+    try {
+      const response = await fetch("/api/vault", { method: "DELETE" });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Réinitialisation impossible.");
+      vaultKeyRef.current = null;
+      setVaultRecord(null);
+      setVaultUnlocked(false);
+      setKeys({ openai: "", google: "" });
+      setVaultPassphrase("");
+      setVaultConfirmation("");
+      setVaultNotice("Coffre réinitialisé. Vous pouvez en créer un nouveau.");
+    } catch (cause) {
+      setVaultError(cause instanceof Error ? cause.message : "Réinitialisation impossible.");
+    } finally {
+      setVaultBusy(false);
+    }
   }
 
   async function createAccount(event: FormEvent) {
@@ -583,6 +741,7 @@ export default function Home() {
     if (!canGenerate) return;
     setIsLoading(true);
     setError(null);
+    setErrorCode(null);
     setCopied(false);
 
     try {
@@ -607,8 +766,12 @@ export default function Home() {
         historyItem?: HistoryItem;
         historyWarning?: string;
         error?: string;
+        code?: GenerationErrorCode;
       };
-      if (!response.ok || !payload.image) throw new Error(payload.error || "La génération a échoué.");
+      if (!response.ok || !payload.image) {
+        setErrorCode(payload.code ?? null);
+        throw new Error(payload.error || "La génération a échoué.");
+      }
       const info = {
         model: payload.model || selectedModelId,
         modelName: selectedModel.name,
@@ -708,8 +871,80 @@ export default function Home() {
               <input id="api-key" type={showKey ? "text" : "password"} value={keys[provider]} onChange={(event) => updateKey(event.target.value)} placeholder={active.placeholder} autoComplete="off" spellCheck={false} aria-describedby="key-help" />
               <button type="button" onClick={() => setShowKey((value) => !value)} aria-label={showKey ? "Masquer la clé" : "Afficher la clé"}><Icon name={showKey ? "eyeOff" : "eye"} /></button>
             </div>
-            <p className="field-help" id="key-help">Gardée dans cet onglet uniquement · jamais enregistrée sur le serveur</p>
+            <p className="field-help" id="key-help">Jamais enregistrée en clair · chiffrement et déchiffrement sur cet appareil</p>
           </div>
+
+          <section className={`api-vault ${vaultUnlocked ? "unlocked" : ""}`} aria-label="Coffre de clés synchronisé">
+            <div className="vault-heading">
+              <span className="vault-icon"><Icon name="shield" /></span>
+              <div><b>Coffre synchronisé</b><small>Mobile + PC · chiffrement AES‑GCM</small></div>
+              <span className="vault-state">{account.status !== "ready" ? "Compte requis" : vaultRecord === undefined ? "Chargement" : vaultUnlocked ? "Déverrouillé" : vaultRecord ? "Verrouillé" : "À créer"}</span>
+            </div>
+
+            {account.status !== "ready" ? (
+              <div className="vault-gate">
+                <p>Un compte NeoImage est nécessaire pour synchroniser le coffre.</p>
+                {account.status === "signedOut" && <a href={account.signInUrl}>Google, Microsoft, Apple ou SSO</a>}
+                {account.status === "needsProfile" && <button type="button" onClick={() => setActiveView("history")}>Créer le compte NeoImage</button>}
+              </div>
+            ) : vaultRecord === undefined ? (
+              <div className="vault-loading"><span /> Chargement du coffre…</div>
+            ) : vaultRecord === null ? (
+              <div className="vault-form">
+                <p>Créez une phrase secrète identique sur tous vos appareils. Elle ne pourra pas être récupérée.</p>
+                <div className="vault-passphrases">
+                  <input
+                    type="password"
+                    value={vaultPassphrase}
+                    onChange={(event) => setVaultPassphrase(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void createVault(); } }}
+                    placeholder="Phrase secrète · 12 caractères minimum"
+                    autoComplete="off"
+                    aria-label="Créer une phrase secrète"
+                  />
+                  <input
+                    type="password"
+                    value={vaultConfirmation}
+                    onChange={(event) => setVaultConfirmation(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void createVault(); } }}
+                    placeholder="Confirmer la phrase"
+                    autoComplete="off"
+                    aria-label="Confirmer la phrase secrète"
+                  />
+                </div>
+                <button className="vault-primary" type="button" disabled={vaultBusy} onClick={() => void createVault()}>{vaultBusy ? "Chiffrement…" : "Créer et synchroniser"}</button>
+              </div>
+            ) : !vaultUnlocked ? (
+              <div className="vault-form">
+                <p>Saisissez votre phrase secrète pour récupérer les clés sur cet appareil.</p>
+                <div className="vault-unlock-row">
+                  <input
+                    type="password"
+                    value={vaultPassphrase}
+                    onChange={(event) => setVaultPassphrase(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void unlockVault(); } }}
+                    placeholder="Votre phrase secrète"
+                    autoComplete="off"
+                    aria-label="Phrase secrète du coffre"
+                  />
+                  <button className="vault-primary" type="button" disabled={vaultBusy} onClick={() => void unlockVault()}>{vaultBusy ? "Ouverture…" : "Déverrouiller"}</button>
+                </div>
+                <button className="vault-reset" type="button" disabled={vaultBusy} onClick={() => void resetVault()}>Phrase perdue ? Réinitialiser le coffre</button>
+              </div>
+            ) : (
+              <div className="vault-open">
+                <div className="vault-providers"><span className={keys.openai ? "ready" : ""}>OpenAI {keys.openai ? "prête" : "vide"}</span><span className={keys.google ? "ready" : ""}>Google {keys.google ? "prête" : "vide"}</span></div>
+                <p>Modifiez les clés ci-dessus, puis synchronisez. La phrase reste uniquement en mémoire pendant cette session.</p>
+                <div className="vault-actions">
+                  <button className="vault-primary" type="button" disabled={vaultBusy} onClick={() => void syncVault()}>{vaultBusy ? "Synchronisation…" : "Synchroniser maintenant"}</button>
+                  <button type="button" onClick={lockVault}>Verrouiller</button>
+                </div>
+              </div>
+            )}
+
+            {vaultError && <p className="vault-feedback error" role="alert">{vaultError}</p>}
+            {vaultNotice && <p className="vault-feedback" role="status">{vaultNotice}</p>}
+          </section>
 
           <div className="divider" />
 
@@ -775,7 +1010,18 @@ export default function Home() {
             <span>{currentFormat.label} {aspectRatio}</span><span>{resolution}</span><span>{selectedModel.name}</span>
           </div>
 
-          {error && <div className="error-message" role="alert">{error}</div>}
+          {error && (
+            <div className={`error-message ${errorCode === "PROVIDER_SAFETY_BLOCK" ? "safety-message" : ""}`} role="alert">
+              {errorCode === "PROVIDER_SAFETY_BLOCK" && <strong>Décision du fournisseur</strong>}
+              <span>{error}</span>
+              {errorCode === "PROVIDER_SAFETY_BLOCK" && (
+                <div className="safety-actions">
+                  <button type="button" onClick={() => document.getElementById("prompt")?.focus()}>Modifier le prompt</button>
+                  <button type="button" onClick={() => changeProvider(provider === "openai" ? "google" : "openai")}>Essayer {provider === "openai" ? "Google" : "OpenAI"}</button>
+                </div>
+              )}
+            </div>
+          )}
 
           <button className="generate-button" type="submit" disabled={!canGenerate}>
             <Icon name="sparkles" /><span>{isLoading ? "Création en cours…" : "Générer l’image"}</span><small>⌘ ↵</small>
@@ -852,10 +1098,11 @@ export default function Home() {
             <div className="account-gate">
               <div className="gate-icon"><Icon name="user" /></div>
               <span className="gate-kicker">Compte requis</span>
-              <h3>Connectez-vous pour ouvrir l’historique</h3>
-              <p>Votre compte NeoImage est lié à votre connexion ChatGPT. Vous pourrez utiliser le même compte sur mobile et PC.</p>
-              <a className="account-primary" href={account.signInUrl}>Continuer avec ChatGPT <Icon name="arrow" /></a>
-              <small>Votre historique vous suivra sur tous vos appareils.</small>
+              <h3>Connectez votre compte NeoImage</h3>
+              <p>Utilisez Google, Microsoft, Apple ou le SSO de votre organisation. À l’étape suivante, ChatGPT vérifie votre identité sans transmettre votre mot de passe à NeoImage.</p>
+              <SocialLoginOptions />
+              <a className="account-primary social-login-primary" href={account.signInUrl}>Choisir mon mode de connexion <Icon name="arrow" /></a>
+              <small><Icon name="shield" /> Connexion sécurisée par ChatGPT · historique synchronisé sur mobile et PC.</small>
             </div>
           )}
 
@@ -864,7 +1111,7 @@ export default function Home() {
               <div className="gate-icon"><Icon name="sparkles" /></div>
               <span className="gate-kicker">Dernière étape</span>
               <h3>Créez votre compte NeoImage</h3>
-              <p>Il sera associé à <b>{account.identity.email}</b> et reconnu lorsque vous vous connecterez sur un autre appareil.</p>
+              <p>Il sera associé à <b>{account.identity.email}</b> et reconnu lorsque vous utiliserez la même connexion Google, Microsoft, Apple ou SSO sur un autre appareil.</p>
               <label htmlFor="account-name">Nom affiché</label>
               <input id="account-name" value={accountName} maxLength={80} onChange={(event) => setAccountName(event.target.value)} placeholder="Votre nom" required />
               {accountError && <div className="account-error" role="alert">{accountError}</div>}
@@ -954,38 +1201,70 @@ export default function Home() {
       </>)}
 
       {viewer && (
-        <div className="image-viewer" role="dialog" aria-modal="true" aria-label="Visionneuse de détails">
-          <div className="viewer-toolbar">
-            <div className="viewer-title"><small>Visionneuse</small><b>{viewer.label}</b></div>
-            <div className="viewer-controls" aria-label="Contrôles du zoom">
-              <button type="button" onClick={() => changeViewerZoom(viewerZoom - 0.1)} disabled={viewerZoom <= 1} aria-label="Réduire le zoom"><Icon name="zoomOut" /></button>
-              <output aria-live="polite">{Math.round(viewerZoom * 100)}%</output>
-              <button type="button" onClick={() => changeViewerZoom(viewerZoom + 0.1)} disabled={viewerZoom >= viewerMaxZoom} aria-label="Augmenter le zoom"><Icon name="zoomIn" /></button>
-              <button type="button" onClick={resetViewerZoom} disabled={viewerZoom === 1} aria-label="Réinitialiser le zoom"><Icon name="reset" /></button>
-              <span className="viewer-control-divider" />
-              <button className="viewer-close" type="button" onClick={() => setViewer(null)} aria-label="Fermer la visionneuse" autoFocus><Icon name="close" /></button>
+        <TransformWrapper
+          ref={viewerTransformApiRef}
+          initialScale={1}
+          minScale={1}
+          maxScale={VIEWER_MAX_ZOOM}
+          limitToBounds
+          centerOnInit
+          centerZoomedOut
+          disablePadding
+          smooth
+          wheel={{ step: 0.0018 }}
+          trackPadPanning={{ disabled: true }}
+          panning={{
+            velocityDisabled: false,
+            allowLeftClickPan: true,
+            allowMiddleClickPan: false,
+            allowRightClickPan: false,
+          }}
+          pinch={{ step: 5, allowPanning: true }}
+          doubleClick={{ mode: "toggle", step: Math.log(1.5), animationTime: 180, animationType: "easeOut" }}
+          zoomAnimation={{ disabled: false, size: 0, animationTime: 180, animationType: "easeOut" }}
+          autoAlignment={{ disabled: false, animationTime: 180, velocityAlignmentTime: 260, animationType: "easeOut" }}
+          velocityAnimation={{
+            disabled: false,
+            sensitivityMouse: 1,
+            sensitivityTouch: 1.15,
+            maxStrengthMouse: 18,
+            maxStrengthTouch: 32,
+            inertia: 1,
+            animationTime: 260,
+            maxAnimationTime: 520,
+            animationType: "easeOut",
+          }}
+          onInit={(ref) => {
+            syncViewerScale(ref.state.scale, ref.instance.wrapperComponent);
+            setViewerZoom(ref.state.scale);
+          }}
+          onTransform={(ref, state) => syncViewerScale(state.scale, ref.instance.wrapperComponent)}
+          onZoomStop={commitViewerScale}
+        >
+          {({ zoomIn, zoomOut, resetTransform }) => (
+            <div className="image-viewer" role="dialog" aria-modal="true" aria-label="Visionneuse de détails">
+              <div className="viewer-toolbar">
+                <div className="viewer-title"><small>Visionneuse</small><b>{viewer.label}</b></div>
+                <div className="viewer-controls" aria-label="Contrôles du zoom">
+                  <button type="button" onClick={() => zoomOut(Math.log(1.25), 180, "easeOut")} disabled={viewerZoom <= 1.001} aria-label="Réduire le zoom"><Icon name="zoomOut" /></button>
+                  <output ref={viewerZoomOutputRef} aria-live="polite">{Math.round(viewerZoom * 100)}%</output>
+                  <button type="button" onClick={() => zoomIn(Math.log(1.25), 180, "easeOut")} disabled={viewerZoom >= VIEWER_MAX_ZOOM} aria-label="Augmenter le zoom"><Icon name="zoomIn" /></button>
+                  <button type="button" onClick={() => resetTransform(180, "easeOut")} disabled={viewerZoom <= 1.001} aria-label="Réinitialiser le zoom"><Icon name="reset" /></button>
+                  <span className="viewer-control-divider" />
+                  <button className="viewer-close" type="button" onClick={() => setViewer(null)} aria-label="Fermer la visionneuse" autoFocus><Icon name="close" /></button>
+                </div>
+              </div>
+              <TransformComponent
+                wrapperClass={`viewer-scroll ${viewerZoom > 1.001 ? "can-pan" : ""}`}
+                contentClass="viewer-stage"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={viewer.src} alt={viewer.alt} draggable={false} />
+              </TransformComponent>
+              <div className="viewer-help"><span>Zoom tiers · max 500%</span><span>Mobile : pincer et glisser</span><span>PC : molette et glisser</span><span>Échap : fermer</span></div>
             </div>
-          </div>
-          <div
-            className={`viewer-scroll ${viewerZoom > 1 ? "can-pan" : ""}`}
-            ref={viewerScrollRef}
-            onWheel={handleViewerWheel}
-            onPointerDown={handleViewerPointerDown}
-            onPointerMove={handleViewerPointerMove}
-            onPointerUp={stopViewerDrag}
-            onPointerCancel={stopViewerDrag}
-            onDoubleClick={(event) => {
-              const bounds = event.currentTarget.getBoundingClientRect();
-              changeViewerZoom(viewerZoom > 1 ? 1 : Math.min(1.5, viewerMaxZoom), event.clientX - bounds.left, event.clientY - bounds.top);
-            }}
-          >
-            <div className="viewer-stage" style={{ width: `${viewerZoom * 100}%`, height: `${viewerZoom * 100}%` }}>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img ref={viewerImageRef} src={viewer.src} alt={viewer.alt} draggable={false} onLoad={updateViewerZoomLimit} />
-            </div>
-          </div>
-          <div className="viewer-help"><span>Zoom max : {Math.round(viewerMaxZoom * 100)}%</span><span>Mobile : pincer et glisser</span><span>PC : molette et glisser</span><span>Échap : fermer</span></div>
-        </div>
+          )}
+        </TransformWrapper>
       )}
 
       <footer><span>NeoImage Studio</span><p>Compte multi-appareils · historique synchronisé et privé</p><span>OpenAI · Google</span></footer>
