@@ -237,6 +237,7 @@ select { appearance: none; width: 100%; border: 1px solid var(--line); backgroun
 .account-gate > p { color: #858a99; font-size: 11px; line-height: 1.7; max-width: 430px; margin: 12px auto 0; }
 .account-gate > p b { color: #c2c6d1; font-weight: 600; }
 .account-gate > small { color: #5d6270; font-size: 8px; margin-top: 12px; }
+.account-gate > small svg { width: 12px; vertical-align: -3px; margin-right: 4px; color: #70c99a; }
 .account-primary { margin-top: 22px; min-height: 43px; border: 0; border-radius: 10px; background: linear-gradient(110deg, #8fa4ff, #ad8dff 55%, #ff9278); color: #0a0b10; padding: 0 16px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; text-decoration: none; font-size: 10px; font-weight: 800; cursor: pointer; box-shadow: 0 10px 30px rgba(110,128,230,.18); }
 .account-primary:disabled { opacity: .4; cursor: not-allowed; }
 .account-primary svg { width: 15px; }
@@ -246,6 +247,14 @@ select { appearance: none; width: 100%; border: 1px solid var(--line); backgroun
 .account-error { width: min(360px, 100%); margin-top: 10px; border: 1px solid rgba(255,112,112,.25); background: rgba(174,47,47,.08); color: #ffaaa3; border-radius: 9px; padding: 9px 11px; font-size: 9px; text-align: left; }
 .account-signout-link { color: #666b79; font-size: 8px; margin-top: 13px; }
 .account-loader { width: 44px; height: 44px; border: 2px solid rgba(255,255,255,.08); border-top-color: #8fa4ff; border-radius: 50%; animation: spin 1s linear infinite; }
+.social-login-options { width: min(430px, 100%); margin-top: 20px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.social-login-option { min-height: 43px; border: 1px solid var(--line); border-radius: 11px; background: rgba(12, 14, 20, .72); color: #aeb2bf; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 8px; font-weight: 700; }
+.social-login-mark { width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; font-style: normal; font-size: 9px; font-weight: 900; background: #f2f3f7; color: #171922; }
+.social-login-mark.google { color: #4285f4; }
+.social-login-mark.microsoft { color: #00a4ef; }
+.social-login-mark.apple { color: #111; }
+.social-login-mark.sso { background: #242834; color: #aebcff; }
+.social-login-primary { margin-top: 12px; }
 
 .account-banner { display: grid; grid-template-columns: auto minmax(160px, 1fr) auto auto; align-items: center; gap: 12px; margin-top: 22px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(100deg, rgba(112,137,255,.07), rgba(255,128,101,.03)); }
 .account-banner-avatar { width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, #8fa4ff, #ff9278); color: #090a0f; display: grid; place-items: center; font-size: 13px; font-weight: 900; }
@@ -368,6 +377,8 @@ footer p { margin: 0; } footer span:last-child { text-align: right; }
   .history-heading > div { align-items: flex-start; flex-direction: column; gap: 5px; }
   .account-gate { margin: 42px auto; }
   .account-gate h3 { font-size: 20px; }
+  .social-login-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .social-login-option { justify-content: flex-start; padding: 0 11px; }
   .account-banner { grid-template-columns: auto minmax(0,1fr); }
   .account-banner > a { grid-column: 1 / -1; text-align: center; border-top: 1px solid var(--line); padding-top: 10px; }
   .history-toolbar { align-items: flex-start; }

@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "NeoImage Studio — Création d’images IA",
-  description: "Créez des images jusqu’au 4K avec OpenAI et Google, puis retrouvez-les sur tous vos appareils grâce à l’historique NeoImage synchronisé.",
+  description: "Créez des images jusqu’au 4K avec OpenAI et Google. Connexion sécurisée par ChatGPT avec Google, Microsoft, Apple ou SSO, puis historique NeoImage synchronisé sur tous vos appareils.",
   openGraph: {
     title: "NeoImage Studio",
     description: "8 modèles, 10 formats, jusqu’au 4K et un historique synchronisé privé.",

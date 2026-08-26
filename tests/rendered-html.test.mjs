@@ -22,6 +22,8 @@ test("renders NeoImage Studio metadata and product surface", async () => {
   assert.match(html, /Historique/);
   assert.match(html, /Nouveau/);
   assert.match(html, /Compte NeoImage/);
+  assert.match(html, /Google, Microsoft, Apple ou SSO/);
+  assert.match(html, /Connexion sécurisée par ChatGPT/);
   assert.match(html, /Coffre synchronisé/);
   assert.match(html, /historique synchronisé privé/);
   assert.doesNotMatch(html, /codex-preview/);

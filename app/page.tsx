@@ -111,6 +111,13 @@ const PROMPT_IDEAS = [
   "Photo produit en lumière naturelle",
 ];
 
+const SOCIAL_LOGIN_OPTIONS = [
+  { id: "google", label: "Google", mark: "G" },
+  { id: "microsoft", label: "Microsoft", mark: "M" },
+  { id: "apple", label: "Apple", mark: "A" },
+  { id: "sso", label: "SSO", mark: "S" },
+] as const;
+
 const VIEWER_MAX_ZOOM = 5;
 const VAULT_KDF_ITERATIONS = 310_000;
 
@@ -204,6 +211,19 @@ function Icon({ name }: { name: "sparkles" | "key" | "eye" | "eyeOff" | "downloa
     close: <><path d="m5 5 14 14M19 5 5 19"/></>,
   };
   return <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+}
+
+function SocialLoginOptions() {
+  return (
+    <div className="social-login-options" aria-label="Méthodes de connexion compatibles">
+      {SOCIAL_LOGIN_OPTIONS.map((option) => (
+        <span className="social-login-option" key={option.id}>
+          <i className={`social-login-mark ${option.id}`} aria-hidden="true">{option.mark}</i>
+          {option.label}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function historyStorageKey(profileId: string) {
@@ -864,7 +884,7 @@ export default function Home() {
             {account.status !== "ready" ? (
               <div className="vault-gate">
                 <p>Un compte NeoImage est nécessaire pour synchroniser le coffre.</p>
-                {account.status === "signedOut" && <a href={account.signInUrl}>Se connecter avec ChatGPT</a>}
+                {account.status === "signedOut" && <a href={account.signInUrl}>Google, Microsoft, Apple ou SSO</a>}
                 {account.status === "needsProfile" && <button type="button" onClick={() => setActiveView("history")}>Créer le compte NeoImage</button>}
               </div>
             ) : vaultRecord === undefined ? (
@@ -1078,10 +1098,11 @@ export default function Home() {
             <div className="account-gate">
               <div className="gate-icon"><Icon name="user" /></div>
               <span className="gate-kicker">Compte requis</span>
-              <h3>Connectez-vous pour ouvrir l’historique</h3>
-              <p>Votre compte NeoImage est lié à votre connexion ChatGPT. Vous pourrez utiliser le même compte sur mobile et PC.</p>
-              <a className="account-primary" href={account.signInUrl}>Continuer avec ChatGPT <Icon name="arrow" /></a>
-              <small>Votre historique vous suivra sur tous vos appareils.</small>
+              <h3>Connectez votre compte NeoImage</h3>
+              <p>Utilisez Google, Microsoft, Apple ou le SSO de votre organisation. À l’étape suivante, ChatGPT vérifie votre identité sans transmettre votre mot de passe à NeoImage.</p>
+              <SocialLoginOptions />
+              <a className="account-primary social-login-primary" href={account.signInUrl}>Choisir mon mode de connexion <Icon name="arrow" /></a>
+              <small><Icon name="shield" /> Connexion sécurisée par ChatGPT · historique synchronisé sur mobile et PC.</small>
             </div>
           )}
 
@@ -1090,7 +1111,7 @@ export default function Home() {
               <div className="gate-icon"><Icon name="sparkles" /></div>
               <span className="gate-kicker">Dernière étape</span>
               <h3>Créez votre compte NeoImage</h3>
-              <p>Il sera associé à <b>{account.identity.email}</b> et reconnu lorsque vous vous connecterez sur un autre appareil.</p>
+              <p>Il sera associé à <b>{account.identity.email}</b> et reconnu lorsque vous utiliserez la même connexion Google, Microsoft, Apple ou SSO sur un autre appareil.</p>
               <label htmlFor="account-name">Nom affiché</label>
               <input id="account-name" value={accountName} maxLength={80} onChange={(event) => setAccountName(event.target.value)} placeholder="Votre nom" required />
               {accountError && <div className="account-error" role="alert">{accountError}</div>}
